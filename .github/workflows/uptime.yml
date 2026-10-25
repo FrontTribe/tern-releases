@@ -1,0 +1,51 @@
+# Checks every 15 minutes that people can reach the site, download Tern, and get updates.
+# A failed run emails whoever last changed this schedule; run it by hand from the Actions tab.
+# GitHub pauses schedules in a public repo after 60 days without a commit: each release keeps it going.
+name: Uptime
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Site, download, update feed and reports
+        run: |
+          set -u
+          site=https://www.ternbrowser.com
+          failed=0
+          fail() { echo "✗ $1"; failed=1; }
+          status() { curl -s -o /dev/null -w '%{http_code}' --retry 2 --retry-all-errors --max-time 20 "$@"; }
+
+          for page in / /download /releases /privacy; do
+            code=$(status "$site$page")
+            [ "$code" = 200 ] && echo "✓ $page" || fail "$page answered $code"
+          done
+
+          feed=$(curl -fsSL --retry 2 --retry-all-errors --max-time 20 "$site/appcast.xml") || fail "/appcast.xml didn't answer"
+          if echo "${feed:-}" | grep -q '<rss'; then
+            echo "✓ /appcast.xml"
+            dmg=$(echo "$feed" | grep -o 'url="[^"]*\.dmg"' | head -1 | cut -d'"' -f2)
+            if [ -n "$dmg" ]; then
+              code=$(status -L -r 0-0 "$dmg")
+              [ "$code" = 200 ] || [ "$code" = 206 ] && echo "✓ $dmg" || fail "$dmg answered $code"
+            else
+              fail "/appcast.xml lists no .dmg"
+            fi
+          else
+            fail "/appcast.xml isn't a feed"
+          fi
+
+          # An empty report is turned away with 400, which shows the endpoint is up without saving anything.
+          for api in /api/diagnostics /api/feedback; do
+            code=$(status -X POST -H 'Content-Type: application/json' -d '{}' "$site$api")
+            [ "$code" = 400 ] && echo "✓ $api" || fail "$api answered $code"
+          done
+
+          exit $failed
